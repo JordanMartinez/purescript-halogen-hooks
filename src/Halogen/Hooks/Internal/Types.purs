@@ -3,6 +3,7 @@ module Halogen.Hooks.Internal.Types where
 import Halogen.Hooks.Types
 import Foreign.Object (Object)
 import Unsafe.Coerce (unsafeCoerce)
+import Data.Eq (class Eq)
 
 foreign import data StateValue :: Type
 
@@ -64,3 +65,10 @@ toRefValue = unsafeCoerce
 
 fromRefValue :: forall a. RefValue -> a
 fromRefValue = unsafeCoerce
+
+data RecheckMemosStatus
+  = NotRunningEffects
+  | RunningEffects
+  | StateChanged_RecheckMemos
+
+derive instance eqRecheckMemosStatus :: Eq RecheckMemosStatus

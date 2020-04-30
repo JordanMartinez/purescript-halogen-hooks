@@ -20,7 +20,7 @@ import Halogen as H
 import Halogen.Hooks.Hook (Hooked)
 import Halogen.Hooks.HookM (HookAp(..), HookF(..), HookM(..))
 import Halogen.Hooks.Internal.Eval.Types (HalogenM', InternalHookState, InterpretHookReason(..), fromQueryFn, toQueryFn)
-import Halogen.Hooks.Internal.Types (MemoValuesImpl, fromMemoValue, fromMemoValues, toQueryValue)
+import Halogen.Hooks.Internal.Types (MemoValuesImpl, RecheckMemosStatus(..), fromMemoValue, fromMemoValues, toQueryValue)
 import Halogen.Hooks.Internal.UseHookF (UseHookF(..))
 import Halogen.Hooks.Types (StateToken(..))
 import Partial.Unsafe (unsafePartial)
@@ -38,9 +38,14 @@ mkEval runHookM runHook hookFn = case _ of
         -- initialize all hooks, enqueue effects,
         -- and then run all enqueued effects
     _ <- runHookAndEffects Initialize
-    -- now check all tick effects' memos in case initial
-    -- effects modified state and memos are now outdated
-    _ <- runHookAndEffects Step
+
+    -- if an effect modified state, recheck all memos
+    -- in case they changed, so we can rerun effects.
+    { recheckMemosStatus } <- getState
+    when (recheckMemosStatus == StateChanged_RecheckMemos ) do
+      -- reset state before rerunning hooks
+      modifyState_ _ { recheckMemosStatus = NotRunningEffects }
+      void $ runHookAndEffects Step
     pure a
 
   H.Query q reply -> do
@@ -123,7 +128,19 @@ interpretHook runHookM runHook reason hookFn = case _ of
       Initialize -> do
         let
           eval = do
+            -- set state to running effects, so that
+            -- state modifications will set status to StatusChanged_RecheckMemos
+            { recheckMemosStatus } <- getState
+            when (recheckMemosStatus == NotRunningEffects) do
+              modifyState_ _ { recheckMemosStatus = RunningEffects }
+
             mbFinalizer <- runHookM (runHook Queued) act
+
+            -- if effect did not modify state, then status will be unchanged
+            -- so set it back to not running effects
+            { recheckMemosStatus: afterRunningEffects } <- getState
+            when (afterRunningEffects == RunningEffects) do
+              modifyState_ _ { recheckMemosStatus = NotRunningEffects }
 
             let
               finalizer = fromMaybe (pure unit) mbFinalizer
@@ -155,24 +172,38 @@ interpretHook runHookM runHook reason hookFn = case _ of
             if (Object.isEmpty memos'.new.memos || not memos'.new.eq memos'.old.memos memos'.new.memos) then do
               let
                 eval = do
+                  -- set state to running effects, so that
+                  -- state modifications will set status to StatusChanged_RecheckMemos
+                  { recheckMemosStatus } <- getState
+                  when (recheckMemosStatus == NotRunningEffects) do
+                    modifyState_ _ { recheckMemosStatus = RunningEffects }
+
                   mbFinalizer <- runHookM (runHook Queued) do
                     -- run the finalizer
                     finalizer
                     -- now run the actual effect, which produces mbFinalizer
                     act
 
-                  { effectCells: { queue: queue' } } <- getState
+                  -- if just true, set flag
+
+                  { effectCells: { queue: queue' }
+                  , recheckMemosStatus: afterRunningEffects } <- getState
 
                   let
                     newFinalizer = fromMaybe (pure unit) mbFinalizer
                     newValue = mbMemos /\ newFinalizer
                     newQueue = unsafeSetCell index newValue queue'
 
-                  modifyState_ _  { effectCells { queue = newQueue } }
-                  -- now rerun all hooks in case the finalizer and initializer
-                  -- modified state, which should trigger other
-                  -- useTickEffects' effects
-                  void $ runHook Step
+                  -- Do two updates in one call.
+                  -- 1. update the queue.
+                  -- 2. reset memo status to NotRunningEffects
+                  modifyState_ _  { effectCells { queue = newQueue }
+                                  , recheckMemosStatus = NotRunningEffects
+                                  }
+                  -- if the effect modified state, recheck other tick effects'
+                  -- memos in case they changed, so we can rerun effects.
+                  when (afterRunningEffects == StateChanged_RecheckMemos ) do
+                    void $ runHook Step
 
               modifyState_ \st -> st
                 { evalQueue = Array.snoc st.evalQueue eval
@@ -280,7 +311,18 @@ evalHookM runHooks (HookM evalUseHookF) = foldFree interpretHalogenHook evalUseH
       -- ensure calls to `get` don't trigger evaluations.
       unless (unsafeRefEq current next) do
         let newQueue = unsafeSetCell token next
-        putState $ state { stateCells { queue = newQueue state.stateCells.queue } }
+
+        -- besides putting the new state, also indicate
+        -- whether an effect modified state
+        case state.recheckMemosStatus of
+          RunningEffects ->
+            putState $ state { stateCells { queue = newQueue state.stateCells.queue }
+                             , recheckMemosStatus = StateChanged_RecheckMemos
+                             }
+          _ ->
+            -- either this is 'NotRunningEffects' or 'StateChanged_RecheckMemos'
+            -- so just leave it as is.
+            putState $ state { stateCells { queue = newQueue state.stateCells.queue } }
         void runHooks
 
       pure (reply next)

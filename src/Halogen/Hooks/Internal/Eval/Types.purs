@@ -8,7 +8,7 @@ import Data.Tuple.Nested (type (/\))
 import Effect.Ref (Ref)
 import Halogen as H
 import Halogen.Hooks.HookM (HookM)
-import Halogen.Hooks.Internal.Types (MemoValue, OutputValue, RefValue, SlotType, StateValue)
+import Halogen.Hooks.Internal.Types (MemoValue, OutputValue, RecheckMemosStatus, RefValue, SlotType, StateValue)
 import Halogen.Hooks.Types (MemoValues, OutputToken, SlotToken)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -60,6 +60,7 @@ type InternalHookState q i m a =
   , effectCells :: QueueState ((Maybe MemoValues) /\ HookM m Unit)
   , memoCells :: QueueState (MemoValues /\ MemoValue)
   , refCells :: QueueState (Ref RefValue)
+  , recheckMemosStatus :: RecheckMemosStatus
   }
 
 type QueueState a =
